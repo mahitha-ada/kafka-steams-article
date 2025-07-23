@@ -157,6 +157,8 @@ The service layer encapsulates our Kafka interaction logic:
 
 [**MessageService.java**](https://github.com/mahitha-ada/kafka-streams/blob/main/kafka-streams-demo/src/main/java/com/example/service/MessageService.java) handles Kafka producer integration - it takes messages from the REST API and publishes them to Kafka topics.
 
+> **Important Implementation Note**: Our working implementation uses a direct `KafkaProducer<String, String>` rather than Micronaut's `@KafkaClient` interface. This ensures reliable JSON string serialization and avoids common issues where messages appear to be sent successfully but arrive as null values in the Kafka Streams processor.
+
 [**WordCountService.java**](https://github.com/mahitha-ada/kafka-streams/blob/main/kafka-streams-demo/src/main/java/com/example/service/WordCountService.java) provides the state store query interface - it lets you query the current word counts from the Kafka Streams state store.
 
 ## Testing the Application
@@ -193,13 +195,59 @@ curl -X POST http://localhost:8082/api/messages \
   -d '{"content": "hello world hello kafka streams", "userId": "user123"}'
 ```
 
-**Query wordcount:**
+**Query word counts (with expected responses):**
 
 ```bash
+# Should return {"word":"hello","count":2}
+curl http://localhost:8082/api/wordcounts/hello
+
+# Should return {"word":"kafka","count":1}
+curl http://localhost:8082/api/wordcounts/kafka
+
+# Should return {"word":"streams","count":1}
+curl http://localhost:8082/api/wordcounts/streams
+```
+
+**Test incremental counting:**
+
+```bash
+# Send another message
+curl -X POST http://localhost:8082/api/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"content": "hello beautiful world"}'
+
+# Check updated count - should return {"word":"hello","count":3}
 curl http://localhost:8082/api/wordcounts/hello
 ```
 
 Please see the [`TESTING.md`](https://github.com/mahitha-ada/kafka-streams/blob/main/TESTING.md) for full instructions for testing.
+
+### Verification That It Works
+
+Once you have the application running, you can verify the complete pipeline:
+
+```bash
+# 1. Send a test message
+curl -X POST http://localhost:8082/api/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "realtime stream processing works perfectly"}'
+
+# 2. Verify word counting (should see count=1 for each word)
+curl http://localhost:8082/api/wordcounts/realtime
+curl http://localhost:8082/api/wordcounts/stream
+curl http://localhost:8082/api/wordcounts/processing
+
+# 3. Send another message to test incremental counting
+curl -X POST http://localhost:8082/api/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content": "stream processing is amazing"}'
+
+# 4. Verify counts incremented (should see count=2 for "stream" and "processing")
+curl http://localhost:8082/api/wordcounts/stream
+curl http://localhost:8082/api/wordcounts/processing
+```
+
+If you see the word counts updating correctly, your stream processing pipeline is working end-to-end!
 
 ## Common Gotchas and Remedies
 
@@ -212,6 +260,33 @@ There were real-world experiences along the way that uncovered some common probl
 This happens because Jackson doesn't know how to handle Java 8 time types by default. You'll see errors like "Cannot construct instance of java.time.Instant" when your application tries to deserialize messages.
 
 **Remedy**: Add the JSR310 module dependency and register it with your ObjectMapper. The complete solution is in the [GitHub repository](https://github.com/mahitha-ada/kafka-streams/blob/main/kafka-streams-demo/src/main/java/com/example/serde/JsonSerde.java).
+
+### Producer Implementation Issues
+
+**Problem**: Messages are sent via REST API but Kafka Streams shows "Processing JSON: null" or doesn't process messages at all.
+
+This is a critical issue that can be frustrating because the REST API appears to work (returns success), but the stream processing pipeline receives null values. The problem typically stems from issues with the Micronaut `@KafkaClient` interface not properly serializing JSON strings as Kafka message values.
+
+**Symptoms you'll see:**
+
+- REST API returns successful message IDs
+- No errors in application logs during message sending
+- Kafka Streams debug logs show "Processing JSON: null"
+- Word counts remain at 0 despite sending messages
+- No exceptions thrown, making it hard to diagnose
+
+**Root Cause**: The `@KafkaClient` interface in Micronaut can have issues with parameter binding and serialization, especially when sending JSON strings as message values.
+
+**Remedy**: Use a direct `KafkaProducer<String, String>` implementation instead of the `@KafkaClient` interface. The complete working implementation can be found in [MessageService.java](https://github.com/mahitha-ada/kafka-streams/blob/main/kafka-streams-demo/src/main/java/com/example/service/MessageService.java).
+
+Key points of the solution:
+
+- Configure Kafka producer directly with Properties
+- Use `StringSerializer` for both key and value serialization
+- Create `ProducerRecord<String, String>` with JSON string as the message value
+- This ensures JSON strings are properly sent as Kafka message values and can be consumed by Kafka Streams
+
+This approach ensures that JSON strings are properly sent as Kafka message values and can be consumed by Kafka Streams.
 
 ### Topic Creation
 
